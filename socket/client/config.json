@@ -1,0 +1,9 @@
+{
+    "redisConfig": {
+        "host": "192.168.101.107",
+        "password": "Aa123456."
+    },
+    "serverConfig": {
+        "host": "10.11.163.179"
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "redisConfig": {
+        "host": "192.168.101.107",
+        "password": "Aa123456."
+    },
+    "localConfig": {
+        "ip": "10.11.163.179"
+    },
+    "offlineDelFields":{
+        "system": ["systemInfo", "systemInfoIPV4"]
+    }
+}
