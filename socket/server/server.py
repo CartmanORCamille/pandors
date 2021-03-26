@@ -258,16 +258,9 @@ class Troy():
 
     def _udpSendCmdMode(self):
         # 控制台下发（只能单发）
-        msg = None
-        while 1:
-            order = str(input('\rINPUT: say something...\n'))
-            # 获取指令字典信息
-            msg = self.instruction.get(order, 0)
-            if not msg:
-                PrettyCode.prettyPrint('此命令不存在。', 'ERROR')
-                continue
-            break
-        return msg
+        order = str(input('\rINPUT: say something...\n'))
+        return order
+        #27.94 12.89
 
     def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list):
         """udp发包操作函数（所有存活客户端），只做发送操作。
@@ -441,7 +434,6 @@ class Troy():
                         print('aaa')
                         self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
                         self.logObj.logHandler().info('All tasks have been completed.')
-
 
         return msgCode
             
