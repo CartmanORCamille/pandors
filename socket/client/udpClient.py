@@ -17,7 +17,7 @@ import uuid
 import os, subprocess
 from concurrent.futures import thread, ThreadPoolExecutor
 import queue
-from auxiliaryTools import PrettyCode, ChangeRedis
+from auxiliaryTools import PrettyCode, ChangeRedis, BasicLogs
 
 
 class Client():
@@ -26,10 +26,6 @@ class Client():
         self.config = Client._loadingConfig()
         self.maternalIpInfo = None
         self.tcpClientSocket = None
-
-        # 实例化redis
-        self.redisObj = ChangeRedis(self.config.get('redisConfig'))
-        PrettyCode.prettyPrint('redis server 连接成功。')
 
         # 线程配置
         self.event = threading.Event()
@@ -48,13 +44,45 @@ class Client():
             'oncall': []
         }
 
+        # 实例化日志
+        logName = 'ant_{}.log'.format(time.strftime('%S_%M_%H_%d_%m_%Y'))
+        self.logObj = BasicLogs.handler(logName=logName)
+
+        # 实例化redis
+        self.redisObj = ChangeRedis(self.config.get('redisConfig'))
+        PrettyCode.prettyPrint('redis server 连接成功。')
+
+        # 启动前检查
+        self.checkBeforeStarting()
+
+        # 日志开关
+        self.logEncrypt = True
+
+    def checkBeforeStarting(self):
+        # 运行前的一些检查，防止错误启动
+
+        # 端口检查
+        pid = self._checkPort(6655)
+        if pid:
+            process = self._findProcess(pid)
+            self._killProcess(process)
+
+        # portStatus = pass
+    
     def recvMsg(self) -> None:
         # udp
         self.udpClientSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         while 1:
             if self.maternalIpInfo:
                 # TCP创建完成后才能拿到地址
-                self.udpClientSocket.bind(self.maternalIpInfo)
+                try:
+                    self.udpClientSocket.bind(self.maternalIpInfo)
+                except Exception as e:
+                    # UDP连接异常排查
+                    self.logObj.logHandler().error(e)
+                    self.checkBeforeStarting()
+                    time.sleep(5)
+                    self.udpClientSocket.bind(self.maternalIpInfo)
                 break
             continue
         PrettyCode.prettyPrint('UDP对象创建成功。')
@@ -65,6 +93,8 @@ class Client():
             recvMsg = data[0].decode('utf-8')
             if recvMsg:
                 msg = '数据已接收：{}\n'.format(recvMsg)
+                logMsg = 'Data received - {}'.format(recvMsg)
+                self.logObj.logHandler().info(logMsg)
                 PrettyCode.prettyPrint(msg)
 
                 # 判断信息类型
@@ -204,6 +234,9 @@ class Client():
             order (str): CMD命令
         """
         self.lock.acquire()
+        logMsg = 'Task started - {}'.format(order)
+        self.logObj.logHandler().info(logMsg)
+
         worker = self.taskPool.submit(self.taskExecuteCMD, order, )
         self.lock.release()
         result = Client.performOrderResult(worker)
@@ -282,12 +315,14 @@ class Client():
             self.lock.acquire()
             msg = '正在执行 - {}'.format(task)
             PrettyCode.prettyPrint(msg)
-            executor = subprocess.Popen(task, shell=True, stdout=subprocess.PIPE)
+            executor = subprocess.Popen(task, shell=True, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
             result = executor.stdout.read().decode('gbk')
             self.lock.release()
             return result
         except Exception as e:
-            raise e
+            errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
+            self.logObj.logHandler().error(errorMsg)
+            self.lock.release()
     
     def daemonlogic(self, existsInfo: dict):
         # 守护进程
@@ -365,6 +400,36 @@ class Client():
         }
         return localInfo
 
+    def _checkPort(self, port: int) -> bool:
+        # 端口检查
+        order = 'netstat -ano|findstr {}'.format(port)
+        # result = subprocess.Popen(order, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        result = self.taskExecuteCMD(order)
+        if result:
+            # 端口被占用
+            pid = result.split()[-1]
+            return pid
+        else:
+            # 端口未被占用
+            return False
+    
+    def _findProcess(self, pid):
+        # 进程查找
+        order = 'tasklist|findstr "{}"'.format(pid)
+        process = self.taskExecuteCMD(order)
+        process = process.split()[0]
+        return process
+        
+    def _killProcess(self, process):
+        # 结束进程
+        try:
+            order = 'taskkill /f /t /im {}'.format(process)
+            self.taskExecuteCMD(order)
+            return True
+        except Exception as e:
+            self.logObj.logHandler().error(e)
+            return False
+
     def _daemonThread(self, existsInfo: dict) -> thread:
         daemonThread = threading.Thread(target=self.daemonlogic, name='daemonThread', args=(existsInfo, ))
         daemonThread.setDaemon(True)
@@ -378,10 +443,6 @@ class Client():
         # 数据信息汇报
         if method == 'get_system':
             self._taskReport('ADH56', self._getClientSystemInfo)
-        
-
-    def _dataReport():
-        pass
 
     def _recvMsgControl(self):
         # 接收信息
