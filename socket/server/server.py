@@ -8,9 +8,12 @@
 
 
 import ast
+import json
+from logging import error
 import socket
 import struct
 import time
+from enum import Enum
 from threading import Thread, enumerate
 from auxiliaryTools import PrettyCode, ChangeRedis, BasicLogs
 
@@ -174,7 +177,9 @@ class Troy():
                     data = self.taskStatus(data = data.decode('utf-8'), addr = addr)
                 except Exception as e:
                     # 数据异常
-                    print(e, e.__traceback__.tb_lineno)
+                    errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
+                    print(errorMsg)
+                    self.logObj.logHandler().error(errorMsg)
                     warningMsg = '数据异常，主动 {} 切断连接，开始等待其他连接。'.format(addr[0])
                     PrettyCode.prettyPrint(warningMsg)
                     self.logObj.logHandler().warning('Data anomalies, {} actively cut off the connection.'.format(addr[0]))
@@ -203,40 +208,33 @@ class Troy():
 
                 else:
                     # 异常情况 - 非异常数据错误（代码错误）
-                    self.logObj.logHandler().error('There are some unexpected situations, the error function: heartbeatMonitoring(self) error report specific location: determine that the heartbeat information has entered the else')
+                    self.logObj.logHandler().error('There are some unexpected situations, the error function: heartbeatMonitoring(self) error report specific location: determine that the heartbeat information has entered the else.')
                     continue
                 
         self.logObj.logHandler().warning('TCP server close.')
         PrettyCode.prettyPrint('TCP SERVER 退出。', 'warning')
-    
-    def taskStatus(self, data: str, addr: str) -> str:
+
+    def taskStatus(self, data, addr: str) -> str:
         # 任务状态监控
         addr = addr[0]
-        recvDataList = data.split('/')
-        standardField = {'keepAlive', 'keepRogerThat', 'keepGotIt'}
-        if not standardField & set(recvDataList):
-            self.logObj.logHandler().error('abnormal data.')
-            raise ValueError('异常数据。')
-        # 获取报文代码
-        dataCode = recvDataList.pop(0)
-        
+
+        recvDataDict = json.loads(data)
+
+        dataCode = recvDataDict.get('flag')
+
+        flagDispatch = {
+            'ADH18': self._ADH18,
+            'ADH27': self._ADH27,
+            'ADH33': self._ADH33,
+            'ADH56': self._ADH56,
+        }
+
         try:
-            if dataCode == 'ADH56':
-                # 数据汇报信息
-                msg = self._ADH56(recvDataList, addr)
-                return msg
-            elif dataCode.startswith('ADH27'):
-                # 任务状态处理
-                phase = dataCode.split('7')[-1]
-                msg = self._ADH27(recvDataList, addr, phase)
-                return msg
-            elif dataCode == 'ADH18':
-                return 'keepAlive'
-            else:
-                raise ValueError('未识别的报文代码。')
+            msg = flagDispatch.get(dataCode)(recvDataDict, (addr, ))
+            return msg
         except Exception as e:
             self.logObj.logHandler().error('Unexpected error: ', e, e.__traceback__.tb_lineno)
-            raise ValueError('异常数据。')
+            raise ValueError('未识别的报文代码。')
 
     def _udpSendDispatchMode(self, key: str, dispatchCommands: dict) -> str:
         """调度指令，传入命令上传redis，传入后下发key至客户端标记开始
@@ -337,9 +335,100 @@ class Troy():
         self.config = PrettyCode.loadingConfigJson(r'.\config.json')
         # 控制台指令字典
         self.instruction = PrettyCode.loadingConfigJson(r'.\instruction.json')
-        
-    def _ADH56(self, info: str, addr):
+    
+    def _ADH18(self, recvDataDict: dict, *args, **kwargs) -> str:
+        ack = recvDataDict.get('ACK')
+        if ack != 'keepAlive':
+            # 验证报文信息
+            self.logObj.logHandler().error('abnormal data.')
+            raise ValueError('异常数据。')
+        return ack
+
+    def _ADH27(self, recvDataDict: dict, *args, **kwargs) -> str:
+        """任务报文处理
+
+        Args:
+            recvDataDict (Dict): 任务信息
+            addr (str): 客户端地址
+
+        Raises:
+            e: 意料之外的错误
+
+        Returns:
+            str: 报文码
+        """
+        # 获取数据
+        self.logObj.logHandler().info('ADH27 function starts processing.')
+        addr = args[0][0]
+        phase = recvDataDict.get('phase')
+
+        if not recvDataDict.get('working') and recvDataDict.get('complete') and recvDataDict.get('oncall'):
+            # 当前客户端没有任务
+            taskId, currentTask, completeTask, notCompleteTask = None, None, None, None
+            # 可能是异常数据，提交了ADH27编号但没任务信息
+            self.logObj.logHandler().warning('It may be abnormal data. ADH27 number is submitted but no task information.')
+            
+        else:
+            # 当前客户端有任务
+            try:
+                taskId = recvDataDict.get('code')
+                currentTask = recvDataDict.get('working')
+                completeTask = recvDataDict.get('complete')
+                notCompleteTask = recvDataDict.get('oncall')
+                
+            except Exception as e:
+                errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
+                self.logObj.logHandler().error('There was an error assigning the task dictionary to the ADH27 function.')
+                self.logObj.logHandler().error(errorMsg)
+
+            if phase == 1:
+                # 1阶段初始化未完成任务列表
+                listField = '{}_{}_oncall'.format(taskId, addr)
+                for task in notCompleteTask:
+                    self.redisObj.redisPointer().lpush(listField, task)
+                msg = '{} - 任务已经成功接收。'.format(addr)
+                PrettyCode.prettyPrint(msg)
+            
+            else:
+                statusFields = []
+                # HASH KEY.
+                if taskId:
+                    for i in ['working', 'complete', 'oncall']:
+                        statusFields.append(self._makeFieldsName(taskId, i))
+
+                if phase == 2:
+                    # 任务状态检测
+                    if currentTask:
+                        # 置换正在进行的任务
+                        self.redisObj.redisPointer().hset(statusFields[0], addr, currentTask)
+                        tips = '当前任务已置换 {}'.format(currentTask)
+                        self.logObj.logHandler().info('Successful update: task in progress.')
+                        PrettyCode.prettyPrint(tips)
+
+                if phase == 3:
+                    if completeTask:
+                        # 已完成的任务 hash -> list
+                        self.statusOfWork(addr, completeTask, taskId, 'complete', statusFields[1])
+                        self.logObj.logHandler().info('Successful update: completed tasks.')
+
+                    if notCompleteTask:
+                        # 未完成的任务 hash -> list
+                        self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
+                        self.logObj.logHandler().info('Successful update: unfinished tasks.')
+
+                    if not notCompleteTask and not currentTask:
+                        # 所有任务已完成
+                        self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
+                        self.logObj.logHandler().info('All tasks have been completed.')
+
+        return 'keepGotIt'
+
+    def _ADH33(self, recvDataDict: dict, *args, **kwargs) -> None:
+        return True
+
+    def _ADH56(self, info: str, *args, **kwargs):
         # 系统信息处理
+        addr = args[0]
         self.logObj.logHandler().info('ADH56 function starts processing.')
         localInfo = ast.literal_eval(info[-1])
         # 信息入库
@@ -357,86 +446,6 @@ class Troy():
         PrettyCode.prettyPrint('ADH56任务处理完成。')
         return 'keepRogerthat'
 
-    def _ADH27(self, recvDataList: list, addr: str, phase: str) -> str:
-        """任务报文处理
-
-        Args:
-            recvDataList (list): 任务信息
-            addr (str): 客户端地址
-            phase (str): 传输阶段
-
-        Raises:
-            e: 意料之外的错误
-
-        Returns:
-            str: 报文码
-        """
-        # 获取数据
-        self.logObj.logHandler().info('ADH27 function starts processing.')
-        # 数据结构 - keepAlive/任务编号/目前正在进行的任务/已完成的任务/未完成的任务
-        if len(recvDataList) == 1:
-            # 当前客户端没有任务
-            taskId, currentTask, completeTask, notCompleteTask = None, None, None, None
-            # 可能是异常数据，提交了ADH27编号但没任务信息
-            self.logObj.logHandler().warning('It may be abnormal data. ADH27 number is submitted but no task information.')
-        else:
-            # 当前客户端有任务
-            try:
-                msgCode, taskId, currentTask, completeTask, notCompleteTask = [i for i in recvDataList]
-                print(msgCode, taskId, type(currentTask), completeTask, notCompleteTask)
-                if completeTask or notCompleteTask:
-                    if currentTask == 'None':
-                        currentTask = ast.literal_eval(currentTask)
-                    completeTask = ast.literal_eval(completeTask)
-                    notCompleteTask = ast.literal_eval(notCompleteTask)
-                    
-            except Exception as e:
-                print(e, e.__traceback__.tb_lineno)
-                raise e
-
-            if phase == 'I':
-                # I阶段初始化未完成任务列表
-                listField = '{}_{}_oncall'.format(taskId, addr)
-                for task in notCompleteTask:
-                    self.redisObj.redisPointer().lpush(listField, task)
-                msg = '{} - 任务已经成功接收。'.format(addr)
-                PrettyCode.prettyPrint(msg)
-            
-            else:
-                statusFields = []
-                # HASH KEY.
-                if taskId:
-                    for i in ['working', 'complete', 'oncall']:
-                        statusFields.append(self._makeFieldsName(taskId, i))
-
-                if phase == 'II':
-                    # 任务状态检测
-                    if currentTask:
-                        # 置换正在进行的任务
-                        self.redisObj.redisPointer().hset(statusFields[0], addr, currentTask)
-                        tips = '当前任务已置换 {}'.format(currentTask)
-                        self.logObj.logHandler().info('Successful update: task in progress.')
-                        PrettyCode.prettyPrint(tips)
-
-                if phase == 'III':
-                    if completeTask:
-                        # 已完成的任务 hash -> list
-                        self.statusOfWork(addr, completeTask, taskId, 'complete', statusFields[1])
-                        self.logObj.logHandler().info('Successful update: completed tasks.')
-
-                    if notCompleteTask:
-                        # 未完成的任务 hash -> list
-                        self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
-                        self.logObj.logHandler().info('Successful update: unfinished tasks.')
-
-                    if not notCompleteTask and not currentTask:
-                        # 所有任务已完成
-                        print('aaa')
-                        self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
-                        self.logObj.logHandler().info('All tasks have been completed.')
-
-        return msgCode
-            
     def _makeFieldsName(self, taskId, status, *args, **kwargs):
         # redis 任务状态字段
         field = '{}_{}'.format(taskId, status)
@@ -484,7 +493,6 @@ class Troy():
                     PrettyCode.prettyPrint(tips)
             elif statusListField == 'oncall':
                 if nTask in allTasks:
-                    print(tasks)
                     # 此次传递已完成任务列表的该项任务在redis未完成任务列表中（该任务已经完成）
                     getattr(self, '_statusOfWorkNotCompleted')(listField, nTask)
                     tips = '{} 已删除未完成列表。'.format(nTask)
