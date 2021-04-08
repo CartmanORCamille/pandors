@@ -14,6 +14,7 @@ import time
 import threading
 import struct
 import uuid
+import json
 import os, subprocess
 from concurrent.futures import thread, ThreadPoolExecutor
 import queue
@@ -37,7 +38,7 @@ class Client():
 
         # 报文信息（任务汇报）
         self.initializationTaskInfo = {
-            'kp': None,
+            'flag': None,
             'code': None,
             'working': None,
             'complete': [],
@@ -86,16 +87,39 @@ class Client():
                 break
             continue
         PrettyCode.prettyPrint('UDP对象创建成功。')
+
         # 永久等待信息下发
         self.udpClientSocket.settimeout(None)
         while 1:
-            data = self.udpClientSocket.recvfrom(1024)
-            recvMsg = data[0].decode('utf-8')
+            try:
+                data = self.udpClientSocket.recvfrom(1024)
+                recvMsg = data[0].decode('utf-8')
+            except Exception as e:
+                # 数据意料之外的情况
+                self.logObj.logHandler().error(e)
+                # 通知重发
+                abnormalAnswer = {
+                    'flag': 'ADH33',
+                    'RCC': 2,
+                    'answerTime': time.time(),
+                }
+                answerInfo = self.makeInfoMsg(abnormalAnswer)
+                self.sendMsg(answerInfo)
+
             if recvMsg:
                 msg = '数据已接收：{}\n'.format(recvMsg)
                 logMsg = 'Data received - {}'.format(recvMsg)
                 self.logObj.logHandler().info(logMsg)
                 PrettyCode.prettyPrint(msg)
+
+                # 正常应答
+                normalAnswer = {
+                    'flag': 'ADH33',
+                    'RCC': 1,
+                    'answerTime': time.time(),
+                }
+                answerInfo = self.makeInfoMsg(normalAnswer)
+                self.sendMsg(answerInfo)
 
                 # 判断信息类型
                 if recvMsg.startswith('AC'):
@@ -158,12 +182,17 @@ class Client():
     def makeInfoMsg(self, taskStatus: dict = {}) -> str:
         # 构建报文，default = 'keepAlive'
         if not taskStatus:
-            taskStatus = {'kp': 'ADH18/keepAlive', }
-        msgList = []
-        for key, value in taskStatus.items():
-            msgList.append(str(value))
-                
-        msg = '/'.join(msgList)
+            taskStatus = {
+                'flag': 'ADH18',
+                'phase': 1,
+                'ACK': 'keepAlive',
+            }
+
+        if 'flag' not in taskStatus.keys():
+            self.logObj.logHandler().error('msg need flag.')
+            raise ValueError('缺少flag值')
+
+        msg = json.dumps(taskStatus)
         return msg
 
     def TCPConnect(self) -> None:
@@ -220,6 +249,14 @@ class Client():
 
     @staticmethod
     def performOrderResult(worker):
+        """任务执行结果
+
+        Args:
+            worker (obj): sub对象。
+
+        Returns:
+            str: 任务结果信息。
+        """
         worker.add_done_callback(worker.result)
         while 1:
             if worker.done():
@@ -255,12 +292,16 @@ class Client():
         taskBook = self.redisObj.redisPointer().zrange(taskId, 0, -1, withscores=True, desc=True)
         if taskBook:
             PrettyCode.prettyPrint('任务获取成功。')
-            initializationTaskInfo = self.initializationTaskInfo
-            initializationTaskInfo['kp'] = 'ADH27I/keepGotIt'
-            initializationTaskInfo['code'] = taskId
-            # 添加任务至未完成列表并上传到redis
-            initializationTaskInfo['complete'] = []
-            initializationTaskInfo['oncall'] = [i[0] for i in taskBook]
+            # initializationTaskInfo = self.initializationTaskInfo
+            initializationTaskInfo = {
+                'flag': 'ADH27',
+                'code': taskId,
+                'phase': 1,
+                'working': None,
+                'complete': [],
+                # 添加任务至未完成列表并上传到redis
+                'oncall': [i[0] for i in taskBook],
+            }
 
             # 发送讯息已经接收到任务，即将开始执行
             taskInfo = self.makeInfoMsg(initializationTaskInfo)
@@ -271,7 +312,6 @@ class Client():
             PrettyCode.prettyPrint('任务获取失败。')
             raise ValueError('任务获取失败。')
         
-
         # 开始执行任务
         for task in taskBook:
             # 上锁
@@ -283,7 +323,7 @@ class Client():
             self.lock.release()
 
             # 发送执行报文
-            initializationTaskInfo['kp'] = 'ADH27II/keepGotIt'
+            initializationTaskInfo['phase'] = 2
             initializationTaskInfo['working'] = task[0]
             taskInfo = self.makeInfoMsg(initializationTaskInfo)
             self.sendMsg(taskInfo)
@@ -292,7 +332,7 @@ class Client():
             result = Client.performOrderResult(worker)
 
             # 发送任务执行完成报文
-            initializationTaskInfo['kp'] = 'ADH27III/keepGotIt'
+            initializationTaskInfo['phase'] = 3
             taskStatusDict = self._taskReportMsgComplete(initializationTaskInfo, task[0])
             taskInfo = self.makeInfoMsg(taskStatusDict)
             print('完成报文', taskInfo)
@@ -342,20 +382,14 @@ class Client():
             time.sleep(10)
 
     def _taskReportMsgComplete(self, info: dict, task: str):
-        # 当任务执行完后更新信息
-        for key in info.keys():
-            if key == 'working':
-                info[key] = None
-            elif key == 'complete':
-                info.get(key).append(task)
-            elif key == 'oncall':
-                info.get(key).pop(0)
-            elif key == 'kp' or key == 'code':
-                # 报头标识符忽略不作处理
-                pass
-            else:
-                # 异常数据
-                raise ValueError('异常数据')
+        # 当一个任务执行完后更新信息
+        info['working'] = None
+        info.get('complete').append(task)
+        if task == info.get('oncall')[0]:
+            info.get('oncall').pop(0)
+        else:
+            info.get('oncall').remove(task)
+
         return info
         
     def _taskReport(self, code, func):
