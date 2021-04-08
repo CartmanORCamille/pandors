@@ -162,7 +162,7 @@ class Client():
                 if 'keepAlive' not in msg:
                     # 判断是普通心跳包还是其他信息
                     break
-                # 需要间隔，不然会粘包，服务端接收数据出错
+                # 发送间隔
                 time.sleep(5)     
                 
             except socket.timeout as timeoutE:
@@ -170,6 +170,7 @@ class Client():
                 self.lock.release()
                 PrettyCode.prettyPrint('发送超时，正在尝试重新发送。', 'ERROR')
                 continue
+            
             except Exception as e:
                 # 释放锁
                 self.lock.release()
@@ -288,11 +289,11 @@ class Client():
             standardEnd (bool, optional): 执行模式. Defaults to True.
         """
 
-        # 获取任务列表，从优先级最高到最低 -> (任务，优先级)
+        # 获取任务列表，从优先级最高到最低（zrange value 低的值优先级高） -> (任务，优先级)
         taskBook = self.redisObj.redisPointer().zrange(taskId, 0, -1, withscores=True, desc=True)
+        print(taskBook)
         if taskBook:
             PrettyCode.prettyPrint('任务获取成功。')
-            # initializationTaskInfo = self.initializationTaskInfo
             initializationTaskInfo = {
                 'flag': 'ADH27',
                 'code': taskId,
@@ -305,7 +306,7 @@ class Client():
 
             # 发送讯息已经接收到任务，即将开始执行
             taskInfo = self.makeInfoMsg(initializationTaskInfo)
-            print('接收报文', taskInfo)
+            # print('接收报文', taskInfo)
             self.sendMsg(taskInfo)
         
         else:
@@ -327,7 +328,7 @@ class Client():
             initializationTaskInfo['working'] = task[0]
             taskInfo = self.makeInfoMsg(initializationTaskInfo)
             self.sendMsg(taskInfo)
-            print('执行报文', taskInfo)
+            # print('执行报文', taskInfo)
             worker.add_done_callback(worker.result)
             result = Client.performOrderResult(worker)
 
@@ -335,12 +336,13 @@ class Client():
             initializationTaskInfo['phase'] = 3
             taskStatusDict = self._taskReportMsgComplete(initializationTaskInfo, task[0])
             taskInfo = self.makeInfoMsg(taskStatusDict)
-            print('完成报文', taskInfo)
+            # print('完成报文', taskInfo)
             self.sendMsg(taskInfo)
 
             msg = '{} - 任务完成。'.format(task[0])
             PrettyCode.prettyPrint(msg)
 
+            # 任务执行间隔
             time.sleep(5)
 
         return True

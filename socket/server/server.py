@@ -21,7 +21,7 @@ from auxiliaryTools import PrettyCode, ChangeRedis, BasicLogs
 class Troy():
     def __init__(self):
         # 初始化
-        self.config, self.instruction= None, None
+        self.config= None
         self._loadingConfig()
 
         # 实例化日志
@@ -178,7 +178,6 @@ class Troy():
                 except Exception as e:
                     # 数据异常
                     errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
-                    print(errorMsg)
                     self.logObj.logHandler().error(errorMsg)
                     warningMsg = '数据异常，主动 {} 切断连接，开始等待其他连接。'.format(addr[0])
                     PrettyCode.prettyPrint(warningMsg)
@@ -230,6 +229,7 @@ class Troy():
         }
 
         try:
+            # 执行对应函数
             msg = flagDispatch.get(dataCode)(recvDataDict, (addr, ))
             return msg
         except Exception as e:
@@ -251,14 +251,14 @@ class Troy():
             self.redisObj.redisPointer().zadd(key, dispatchCommands)
             PrettyCode.prettyPrint('任务已成功更新。')
         except Exception as e:
-            print(e, e.__traceback__.tb_lineno)
+            errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
+            self.logObj.logHandler().error(errorMsg)
         return key
 
     def _udpSendCmdMode(self):
         # 控制台下发（只能单发）
         order = str(input('\rINPUT: say something...\n'))
         return order
-        #27.94 12.89
 
     def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list):
         """udp发包操作函数（所有存活客户端），只做发送操作。
@@ -328,13 +328,10 @@ class Troy():
         
     def _loadingConfig(self):
         """读取配置文件
-            指令 -> dict
             用户 -> list
         """
         # 配置文件
         self.config = PrettyCode.loadingConfigJson(r'.\config.json')
-        # 控制台指令字典
-        self.instruction = PrettyCode.loadingConfigJson(r'.\instruction.json')
     
     def _ADH18(self, recvDataDict: dict, *args, **kwargs) -> str:
         ack = recvDataDict.get('ACK')
@@ -397,6 +394,11 @@ class Troy():
                         statusFields.append(self._makeFieldsName(taskId, i))
 
                 if phase == 2:
+                    """任务类型
+                        currentTask(str)
+                        completeTask(list)
+                        notCompleteTask(list)
+                    """
                     # 任务状态检测
                     if currentTask:
                         # 置换正在进行的任务
@@ -426,7 +428,7 @@ class Troy():
     def _ADH33(self, recvDataDict: dict, *args, **kwargs) -> None:
         return True
 
-    def _ADH56(self, info: str, *args, **kwargs):
+    def _ADH56(self, info: str, *args, **kwargs) -> None:
         # 系统信息处理
         addr = args[0]
         self.logObj.logHandler().info('ADH56 function starts processing.')
@@ -475,29 +477,47 @@ class Troy():
             self.redisObj.redisPointer().lrem(listField, 1, tasks[0])
 
         # 获取当前存入的新任务信息
-        for nTask in tasks:
-            '''
-                complete:
-                    nTask -> 已完成的任务
-                    如果当前任务在当前获取的allTasks中，即pss；如果不在则添加
-                oncall:
-                    nTask -> 已完成的任务
-                    如果当前任务在获取的allTasks中，即删除；
-            '''
-            if statusListField == 'complete':
+        
+        if statusListField == 'complete':
+            for nTask in tasks:
+                '''目前传入的都是completeTask，即当前已完成的任务
+                    complete:
+                        nTask -> 已完成的任务
+                        如果当前任务在当前获取的allTasks中，即pss；如果不在则添加
+                    oncall:
+                        nTask -> 已完成的任务
+                        如果当前任务在获取的allTasks中，即删除；
+                '''
                 if nTask not in allTasks:
                     # redis已完成任务列表中没有此次传递完成任务列表的该项任务
                     getattr(self, '_statusOfWorkCompleted')(listField, nTask)
                     tips = '{} 已添加完成列表。'.format(nTask)
                     self.logObj.logHandler().info('ADDED: {}'.format(nTask))
                     PrettyCode.prettyPrint(tips)
-            elif statusListField == 'oncall':
+
+        elif statusListField == 'oncall':
+            for nTask in tasks:
                 if nTask in allTasks:
-                    # 此次传递已完成任务列表的该项任务在redis未完成任务列表中（该任务已经完成）
+                    # 此次传递已完成任务列表的该项任务(nTask)在redis未完成任务列表中（该单项任务已经完成），删除notcomplete列表元素
                     getattr(self, '_statusOfWorkNotCompleted')(listField, nTask)
                     tips = '{} 已删除未完成列表。'.format(nTask)
                     self.logObj.logHandler().info('DELETED: {}'.format(nTask))
                     PrettyCode.prettyPrint(tips)
+
+            if sorted(tasks) == sorted(allTasks):
+                # 任务全部完成判断 -> 未完成任务列表为空，已完成任务列表等于所有任务列表
+                # 删除complete列表和hash保存项
+                completeListField = '{}_{}_{}'.format(taskId, addr, 'complete')
+                self.redisObj.redisPointer().hdel('{}_complete'.format(taskId), addr)
+                self.redisObj.redisPointer().delete(completeListField)
+
+                # 删除working hash
+                self.redisObj.redisPointer().hdel('{}_working'.format(taskId), addr)
+
+                msg = '{} - All tasks have been completed'.format(addr)
+                PrettyCode.prettyPrint(msg)
+                self.logObj.logHandler().info(msg)
+                return 1
         
         # 为hash添加列表
         if not self.redisObj.redisPointer().exists(statusHashField):
@@ -586,7 +606,3 @@ class UdpInfo():
 if __name__ == "__main__":
     troy = Troy()
     troy.main(udpCmd=1)
-    # task = UdpInfo()
-    # UdpInfo.ipList()
-    
-    # PrettyCode.prettyPrint('hi')
