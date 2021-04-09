@@ -9,13 +9,14 @@
 
 import ast
 import json
-from logging import error
+from logging import fatal
 import socket
 import struct
 import time
 from enum import Enum
 from threading import Thread, enumerate
 from auxiliaryTools import PrettyCode, ChangeRedis, BasicLogs
+from concurrent.futures import ThreadPoolExecutor
 
 
 class Troy():
@@ -23,6 +24,8 @@ class Troy():
         # 初始化
         self.config= None
         self._loadingConfig()
+        # 重传超时时间
+        self.rto = 3
 
         # 实例化日志
         logName = 'troy_{}.log'.format(time.strftime('%S_%M_%H_%d_%m_%Y'))
@@ -33,6 +36,9 @@ class Troy():
         self.redisObj = ChangeRedis(self.config.get('redisConfig'))
         PrettyCode.prettyPrint('redis server 连接成功。')
         self.logObj.logHandler().info('redis server started successfully.')
+
+        # rcc计时器线程
+        self.rccTimerWorker = ThreadPoolExecutor(max_workers=100)
 
     def existsCheck(self, moles):
         """存活主机检测
@@ -116,12 +122,12 @@ class Troy():
                         self.logObj.logHandler().warning('No online host.')
                         continue
                     PrettyCode.prettyPrint('执行下发所有存活客户端。')
-                    self._udpSenderAllSurvive(udpSocket, msg, moles)
+                    self._udpSenderAllSurvive(udpSocket, msg, moles, key)
                 else:
                     # 下发指定客户端
                     assert isinstance(specified, list), '错误的类型数据，请传入list。'
                     PrettyCode.prettyPrint('执行下发指定客户端。')
-                    self._udpSenderSpecified(udpSocket, msg, specified)
+                    self._udpSenderSpecified(udpSocket, msg, specified, key)
                     PrettyCode.prettyPrint('执行下发指定客户端函数结束。退出udp服务器。')
                     break
             except Exception as e:
@@ -216,9 +222,7 @@ class Troy():
     def taskStatus(self, data, addr: str) -> str:
         # 任务状态监控
         addr = addr[0]
-
         recvDataDict = json.loads(data)
-
         dataCode = recvDataDict.get('flag')
 
         flagDispatch = {
@@ -260,24 +264,31 @@ class Troy():
         order = str(input('\rINPUT: say something...\n'))
         return order
 
-    def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list):
+    def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list, taskId: str):
         """udp发包操作函数（所有存活客户端），只做发送操作。
 
         Args:
             msg (str): 需要发送的信息。
             moles (list): 需要发送的地址。
+            taskId (str): 任务ID。
         """
         for mole in moles:
             udpSocket.sendto(msg.encode('utf-8'), (mole, 6655))
         result = '{} - 下发完成 - 所有存活主机。'.format(mole)
         self.logObj.logHandler().info('{} - Delivery is complete (all online hosts).'.format(mole))
+
+        # 上传应答表
+        self._responseForm(taskId, moles)
+
         PrettyCode.prettyPrint(result)
 
-    def _udpSenderSpecified(self, udpSocket, msg: str, specifyTheMole: list) -> None:
+    def _udpSenderSpecified(self, udpSocket, msg: str, specifyTheMole: list, taskId: str) -> None:
         """udp发包操作函数（指定客户端），只做发送操作。
 
         Args:
             msg (str): 需要发送的信息。
+            specifyTheMole (list): 主机信息。
+            taskId (str): 任务ID。
         """
         # 获取离线列表
         offline = self.existsCheck(specifyTheMole)
@@ -288,11 +299,23 @@ class Troy():
                 udpSocket.sendto(msg.encode('utf-8'), (mole, 6655))
                 result = '{} - 下发完成 - 指定主机。'.format(mole)
                 self.logObj.logHandler().info('{} - Delivery completed (specify host).'.format(mole))
+
+                # 上传应答表
+                self._responseForm(taskId, specifyTheMole)
+
                 PrettyCode.prettyPrint(result)
             else:
                 result = '{} 下发失败 - 主机离线。'.format(mole)
                 self.logObj.logHandler().info('{} - Delivery failed (specify host).'.format(mole))
                 PrettyCode.prettyPrint(result, 'ERROR')
+
+    def _responseForm(self, taskId: str, moles: list) -> None:
+        # 上传接收命令的主机到redis表
+        field = '{}_response'.format(taskId)
+        self.redisObj.redisPointer().sadd(field, *moles)
+        msg = 'The task {} answer form has been logged'.format(taskId)
+        self.logObj.logHandler().info(msg)
+        PrettyCode.prettyPrint(msg)
 
     def _tcpRecverInstructions(self, conn, addr):
         """tcp收包函数
@@ -425,8 +448,27 @@ class Troy():
 
         return 'keepGotIt'
 
-    def _ADH33(self, recvDataDict: dict, *args, **kwargs) -> None:
-        return True
+    def _ADH33(self, recvDataDict: dict, *args, **kwargs) -> bool:
+        """应答包处理函数
+
+        Args:
+            recvDataDict (dict): 应答数据。
+
+        Returns:
+            bool: 应答处理状态
+        """
+        rcc = recvDataDict.get('rcc')
+        taskId = recvDataDict.get('taskId', default=None)
+        addr = args[0][0]
+
+        if rcc != 1 or not taskId:
+            # 主动异常情况，需要对此设备重新下发指令
+            return False
+        else:
+            # 正确应答，删除名单
+            field = '{}_response'.format(taskId)
+            self.redisObj.redisPointer().srem(field, addr)
+            return True
 
     def _ADH56(self, info: str, *args, **kwargs) -> None:
         # 系统信息处理
@@ -452,6 +494,25 @@ class Troy():
         # redis 任务状态字段
         field = '{}_{}'.format(taskId, status)
         return field
+
+    def rccTimer(self, taskId: str):
+        # 线程计时器
+        hookTime = time.time()
+        field = '{}_response'.format
+        while 1:
+            # 阻塞等待应答包，等待时间内不检查名单
+            nowTime = time.time()
+            # 检查是否还存在应答名单
+            responseTab = self.redisObj.redisPointer().smembers(field)
+            rtoCheck = nowTime - hookTime
+            if rtoCheck >= self.rto:
+                # 超时
+                if responseTab:
+                # 还存在没有接收到报文的主机 -> 重发
+                    self._udpSenderSpecified()
+                    break
+            
+            time.sleep(1)
 
     def statusOfWork(self, addr: str, tasks: list, taskId: str, statusListField: str, statusHashField: str, *args, **kwargs) -> str:
         """报文任务字段信息处理模块
@@ -558,6 +619,10 @@ class Troy():
         daemonControl = Thread(target=self.funcDaemon, name='daemon', args=(threadInfo, ))
         daemonControl.setDaemon(True)
         return daemonControl
+
+    def _rccControl(self) -> Thread:
+        rccThread = Thread(target=self.rccTimer, name='rccTimer')
+        return rccThread
 
     def _tcpControl(self) -> Thread:
         # TCP线程控制
