@@ -20,6 +20,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 
 class Troy():
+    
+    logName = '{}.log'.format(time.strftime('%S_%M_%H_%d_%m_%Y'))
+
     def __init__(self):
         # 初始化
         self.config= None
@@ -28,8 +31,7 @@ class Troy():
         self.rto = 3
 
         # 实例化日志
-        logName = 'troy_{}.log'.format(time.strftime('%S_%M_%H_%d_%m_%Y'))
-        self.logObj = BasicLogs.handler(logName=logName)
+        self.logObj = BasicLogs.handler(logName=Troy.logName, mark='SERVER')
         # log使用方法：self.logObj.logHandler()
 
         # 实例化redis

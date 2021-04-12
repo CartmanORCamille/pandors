@@ -20,14 +20,15 @@ class BaseLogs():
         @logName:       types_datetime
         @callerPath:    caller function path
     """
-    def __init__(self, logName, callerPath='.\\'):
+    def __init__(self, logName, mark, callerPath='.\\'):
         if not logName:
             todays = datetime.date.today()
             self.logName = '{}{}'.format(todays, '.log')
         self.logName = logName
         self.callerPath = callerPath
         # The main log folder path.
-        self.callerLogsPath = '{}{}'.format(self.callerPath , r'\logs')
+        # self.callerLogsPath = '{}{}'.format(self.callerPath , r'\logs')
+        self.callerLogsPath = os.path.join(callerPath, 'logs', mark)
         # Default log name.
         self.baseLogDir()
     
@@ -64,8 +65,8 @@ class BaseLogs():
 class BasicLogs(BaseLogs):
     
     @staticmethod
-    def handler(logName=None):
-        logsObj = BaseLogs(logName)
+    def handler(mark, logName=None):
+        logsObj = BaseLogs(logName, mark)
         return logsObj
 
 

@@ -9,6 +9,9 @@
 
 
 from server import UdpInfo, Troy
+import time
+from auxiliaryTools import BasicLogs
+
 
 class TaskInfo(UdpInfo):
 
@@ -30,11 +33,12 @@ class TaskInfo(UdpInfo):
     @staticmethod
     def key():
         # return str
-        key = 'AC9198'
+        key = 'AC1115'
         return key
 
 
 if __name__ == '__main__':
     
     serverConnectObj = Troy()
+    serverConnectObj.logObj = BasicLogs.handler(logName=Troy.logName, mark='CATCH')
     serverConnectObj.udpSendInstructions(TaskInfo)
