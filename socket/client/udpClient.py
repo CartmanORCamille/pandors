@@ -67,8 +67,6 @@ class Client():
         if pid:
             process = self._findProcess(pid)
             self._killProcess(process)
-
-        # portStatus = pass
     
     def recvMsg(self) -> None:
         # udp
@@ -98,13 +96,7 @@ class Client():
                 # 数据意料之外的情况
                 self.logObj.logHandler().error(e)
                 # 通知重发
-                abnormalAnswer = {
-                    'flag': 'ADH33',
-                    'RCC': 2,
-                    'answerTime': time.time(),
-                }
-                answerInfo = self.makeInfoMsg(abnormalAnswer)
-                self.sendMsg(answerInfo)
+                self.sendMsg(self.makeInfoMsg(self._structureADH33Msg(3, recvMsg)))
 
             if recvMsg:
                 msg = '数据已接收：{}\n'.format(recvMsg)
@@ -113,13 +105,7 @@ class Client():
                 PrettyCode.prettyPrint(msg)
 
                 # 正常应答
-                normalAnswer = {
-                    'flag': 'ADH33',
-                    'RCC': 1,
-                    'answerTime': time.time(),
-                }
-                answerInfo = self.makeInfoMsg(normalAnswer)
-                self.sendMsg(answerInfo)
+                self.sendMsg(self.makeInfoMsg(self._structureADH33Msg(1, recvMsg)))
 
                 # 判断信息类型
                 if recvMsg.startswith('AC'):
@@ -181,7 +167,7 @@ class Client():
                 raise e
             
     def makeInfoMsg(self, taskStatus: dict = {}) -> str:
-        # 构建报文，default = 'keepAlive'
+        # 构建报文，default = 'keepAlive'，必须携带flag字段
         if not taskStatus:
             taskStatus = {
                 'flag': 'ADH18',
@@ -290,29 +276,38 @@ class Client():
         """
 
         # 获取任务列表，从优先级最高到最低（zrange value 低的值优先级高） -> (任务，优先级)
-        taskBook = self.redisObj.redisPointer().zrange(taskId, 0, -1, withscores=True, desc=True)
-        print(taskBook)
-        if taskBook:
-            PrettyCode.prettyPrint('任务获取成功。')
-            initializationTaskInfo = {
-                'flag': 'ADH27',
-                'code': taskId,
-                'phase': 1,
-                'working': None,
-                'complete': [],
-                # 添加任务至未完成列表并上传到redis
-                'oncall': [i[0] for i in taskBook],
-            }
+        try:
+            taskBook = self.redisObj.redisPointer().zrange(taskId, 0, -1, withscores=True, desc=True)
+            if taskBook:
+                # 正常获取
+                PrettyCode.prettyPrint('任务获取成功。')
 
-            # 发送讯息已经接收到任务，即将开始执行
-            taskInfo = self.makeInfoMsg(initializationTaskInfo)
-            # print('接收报文', taskInfo)
-            self.sendMsg(taskInfo)
-        
-        else:
+                # 构造ADH27 -> 接收报文
+                initializationTaskInfo = {
+                    'flag': 'ADH27',
+                    'code': taskId,
+                    'phase': 1,
+                    'working': None,
+                    'complete': [],
+                    # 添加任务至未完成列表并上传到redis
+                    'oncall': [i[0] for i in taskBook],
+                }
+
+                # 发送讯息已经接收到任务，即将开始执行
+                taskInfo = self.makeInfoMsg(initializationTaskInfo)
+                # print('接收报文', taskInfo)
+                self.sendMsg(taskInfo)
+            else:
+                # 任务book为空，通知SERVER
+                raise ValueError('taskbook is null!')
+                
+        except:
+            # 发送rcc为2的ADH33报文
+            self.sendMsg(self.makeInfoMsg(self._structureADH33Msg(2)))
+
             PrettyCode.prettyPrint('任务获取失败。')
             raise ValueError('任务获取失败。')
-        
+            
         # 开始执行任务
         for task in taskBook:
             # 上锁
@@ -465,6 +460,15 @@ class Client():
         except Exception as e:
             self.logObj.logHandler().error(e)
             return False
+
+    def _structureADH33Msg(self, rcc, taskId=None):
+        answer = {
+            'flag': 'ADH33',
+            'RCC': rcc,
+            'taskId': taskId,
+            'answerTime': time.time(),
+        }
+        return answer
 
     def _daemonThread(self, existsInfo: dict) -> thread:
         daemonThread = threading.Thread(target=self.daemonlogic, name='daemonThread', args=(existsInfo, ))

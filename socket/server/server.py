@@ -93,6 +93,7 @@ class Troy():
 
                 # 上传任务
                 try:
+                    # msg == key
                     msg = self._udpSendDispatchMode(key, dispatchCommands)
                 except Exception as e:
                     errorMsg = '{}{}'.format(e, e.__traceback__.tb_lineno)
@@ -118,20 +119,31 @@ class Troy():
             try:
                 if not specified:
                     # 下发所有存活客户端
+                    # 上传应答表
+                    self._responseForm(msg, moles)
                     if not moles:
                         # 如果没有存活主机
                         PrettyCode.prettyPrint('无存活主机接受信息。', 'warning')
                         self.logObj.logHandler().warning('No online host.')
                         continue
                     PrettyCode.prettyPrint('执行下发所有存活客户端。')
-                    self._udpSenderAllSurvive(udpSocket, msg, moles, key)
+                    self._udpSenderAllSurvive(udpSocket, msg, moles)
+
                 else:
-                    # 下发指定客户端
+                    
+                    # 下发指定客户端 - specified is true
                     assert isinstance(specified, list), '错误的类型数据，请传入list。'
+                    # 上传应答表
+                    self._responseForm(key, specified)
                     PrettyCode.prettyPrint('执行下发指定客户端。')
-                    self._udpSenderSpecified(udpSocket, msg, specified, key)
+                    self._udpSenderSpecified(udpSocket, msg, specified)
                     PrettyCode.prettyPrint('执行下发指定客户端函数结束。退出udp服务器。')
-                    break
+
+                # rcc定时器记录开始
+                rccThread = self._rccControl(taskId=key)
+                rccThread.start()
+                continue
+                
             except Exception as e:
                 PrettyCode.prettyPrint('下发失败 - 意料之外的原因。', 'ERROR')
                 print(e, e.__traceback__.tb_lineno)
@@ -187,8 +199,7 @@ class Troy():
                     # 数据异常
                     errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
                     self.logObj.logHandler().error(errorMsg)
-                    warningMsg = '数据异常，主动 {} 切断连接，开始等待其他连接。'.format(addr[0])
-                    PrettyCode.prettyPrint(warningMsg)
+                    PrettyCode.prettyPrint('数据异常，主动 {} 切断连接，开始等待其他连接。'.format(addr[0]))
                     self.logObj.logHandler().warning('Data anomalies, {} actively cut off the connection.'.format(addr[0]))
                     conn.close()
                     break
@@ -266,7 +277,7 @@ class Troy():
         order = str(input('\rINPUT: say something...\n'))
         return order
 
-    def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list, taskId: str):
+    def _udpSenderAllSurvive(self, udpSocket, msg: str, moles: list):
         """udp发包操作函数（所有存活客户端），只做发送操作。
 
         Args:
@@ -276,21 +287,17 @@ class Troy():
         """
         for mole in moles:
             udpSocket.sendto(msg.encode('utf-8'), (mole, 6655))
-        result = '{} - 下发完成 - 所有存活主机。'.format(mole)
         self.logObj.logHandler().info('{} - Delivery is complete (all online hosts).'.format(mole))
 
-        # 上传应答表
-        self._responseForm(taskId, moles)
+        PrettyCode.prettyPrint('{} - 下发完成 - 所有存活主机。'.format(mole))
 
-        PrettyCode.prettyPrint(result)
-
-    def _udpSenderSpecified(self, udpSocket, msg: str, specifyTheMole: list, taskId: str) -> None:
+    def _udpSenderSpecified(self, udpSocket: object, msg: str, specifyTheMole: list) -> None:
         """udp发包操作函数（指定客户端），只做发送操作。
 
         Args:
-            msg (str): 需要发送的信息。
+            udpSocket (object): udp对象
+            msg (str): 需要发送的信息或任务ID。
             specifyTheMole (list): 主机信息。
-            taskId (str): 任务ID。
         """
         # 获取离线列表
         offline = self.existsCheck(specifyTheMole)
@@ -299,25 +306,22 @@ class Troy():
             # 检查指定客户端是否存活
             if mole not in offline:
                 udpSocket.sendto(msg.encode('utf-8'), (mole, 6655))
-                result = '{} - 下发完成 - 指定主机。'.format(mole)
+                printMsg = '{} - 下发完成 - 指定主机。'.format(mole)
                 self.logObj.logHandler().info('{} - Delivery completed (specify host).'.format(mole))
-
-                # 上传应答表
-                self._responseForm(taskId, specifyTheMole)
-
-                PrettyCode.prettyPrint(result)
+                PrettyCode.prettyPrint(printMsg)
+                return True
             else:
-                result = '{} 下发失败 - 主机离线。'.format(mole)
+                printMsg = '{} 下发失败 - 主机离线。'.format(mole)
                 self.logObj.logHandler().info('{} - Delivery failed (specify host).'.format(mole))
-                PrettyCode.prettyPrint(result, 'ERROR')
+                PrettyCode.prettyPrint(printMsg, 'ERROR')
 
     def _responseForm(self, taskId: str, moles: list) -> None:
         # 上传接收命令的主机到redis表
         field = '{}_response'.format(taskId)
         self.redisObj.redisPointer().sadd(field, *moles)
-        msg = 'The task {} answer form has been logged'.format(taskId)
-        self.logObj.logHandler().info(msg)
-        PrettyCode.prettyPrint(msg)
+        printMsg = 'The task {} answer form has been logged -> {}.'.format(taskId, *moles)
+        self.logObj.logHandler().info(printMsg)
+        PrettyCode.prettyPrint(printMsg)
 
     def _tcpRecverInstructions(self, conn, addr):
         """tcp收包函数
@@ -408,8 +412,8 @@ class Troy():
                 listField = '{}_{}_oncall'.format(taskId, addr)
                 for task in notCompleteTask:
                     self.redisObj.redisPointer().lpush(listField, task)
-                msg = '{} - 任务已经成功接收。'.format(addr)
-                PrettyCode.prettyPrint(msg)
+                printMsg = '{} - 任务已经成功接收。'.format(addr)
+                PrettyCode.prettyPrint(printMsg)
             
             else:
                 statusFields = []
@@ -428,9 +432,9 @@ class Troy():
                     if currentTask:
                         # 置换正在进行的任务
                         self.redisObj.redisPointer().hset(statusFields[0], addr, currentTask)
-                        tips = '当前任务已置换 {}'.format(currentTask)
+                        printMsg = '当前任务已置换 {}'.format(currentTask)
                         self.logObj.logHandler().info('Successful update: task in progress.')
-                        PrettyCode.prettyPrint(tips)
+                        PrettyCode.prettyPrint(printMsg)
 
                 if phase == 3:
                     if completeTask:
@@ -459,18 +463,47 @@ class Troy():
         Returns:
             bool: 应答处理状态
         """
-        rcc = recvDataDict.get('rcc')
-        taskId = recvDataDict.get('taskId', default=None)
-        addr = args[0][0]
+        rcc = recvDataDict.get('RCC')
+        taskId = recvDataDict.get('taskId', None)
+        if args:
+            addr = args[0][0]
 
-        if rcc != 1 or not taskId:
-            # 主动异常情况，需要对此设备重新下发指令
+        if rcc == 0 or rcc == 3:
+            # 主动异常情况，需要对此设备重新下发指令，自动重发
+            logMsg = '{} -> Answer package exception, automatic retransmitting trigger, RCC={}'.format(addr, rcc)
+            self.logObj.logHandler().error(logMsg)
+            try:
+                PrettyCode.prettyPrint('尝试重传: {} - {}'.format(taskId, *args[0]))
+                self.logObj.logHandler().info('Try to retransmit -> {} - {}'.format(taskId, *args[0]))
+
+                result = self._udpSenderSpecified(
+                    socket.socket(socket.AF_INET, socket.SOCK_DGRAM), 
+                    taskId, 
+                    list(args[0]),
+                )
+                if result:
+                    PrettyCode.prettyPrint('重传成功: {} - {}'.format(taskId, *args[0]))
+                    self.logObj.logHandler().info('Retransmission success: {} - {}'.format(taskId, *args[0]))
+
+            except Exception as e:
+                printMsg = 'Retransmission failed: {} - {}'.format(e, e.__traceback__.tb_lineno)
+                PrettyCode.prettyPrint(printMsg)
+                self.logObj.logHandler().error(printMsg)
+
             return False
-        else:
+
+        elif rcc == 2:
+            # 记录查到redis任务，手动处理
+            pass
+
+        elif rcc == 1:
             # 正确应答，删除名单
             field = '{}_response'.format(taskId)
             self.redisObj.redisPointer().srem(field, addr)
             return True
+
+        else:
+            raise ValueError('异常的rcc值。')
 
     def _ADH56(self, info: str, *args, **kwargs) -> None:
         # 系统信息处理
@@ -497,21 +530,39 @@ class Troy():
         field = '{}_{}'.format(taskId, status)
         return field
 
-    def rccTimer(self, taskId: str):
+    def rccTimer(self, taskId: str) -> None:
         # 线程计时器
+        PrettyCode.prettyPrint('RCC定时器已启动 - {}'.format(taskId))
         hookTime = time.time()
-        field = '{}_response'.format
+        field = '{}_response'.format(taskId)
         while 1:
             # 阻塞等待应答包，等待时间内不检查名单
             nowTime = time.time()
             # 检查是否还存在应答名单
-            responseTab = self.redisObj.redisPointer().smembers(field)
             rtoCheck = nowTime - hookTime
             if rtoCheck >= self.rto:
                 # 超时
+                responseTab = self.redisObj.redisPointer().smembers(field)
                 if responseTab:
-                # 还存在没有接收到报文的主机 -> 重发
-                    self._udpSenderSpecified()
+                    # 还存在没有接收到报文的主机 -> 主动引发ADH33函数内的错误机制
+                    for ip in responseTab:
+                        if isinstance(ip, bytes):
+                            PrettyCode.prettyPrint('{} - 任务超时，超时主机 - {}'.format(taskId, ip.decode('utf-8')))
+                        else:
+                            PrettyCode.prettyPrint('{} - 任务超时，超时主机 - {}'.format(taskId, ip))
+                    # 引发异常，引导重发
+                    self._ADH33({
+                        'flag': 'ADH33',
+                        'RCC': 0,
+                        'taskId': taskId,
+                        'answerTime': time.time(),
+                    }, (ip, ))
+                    time.sleep(1)
+                    # 重新进入检测
+                    continue
+
+                else:
+                    # 成功发送
                     break
             
             time.sleep(1)
@@ -554,18 +605,18 @@ class Troy():
                 if nTask not in allTasks:
                     # redis已完成任务列表中没有此次传递完成任务列表的该项任务
                     getattr(self, '_statusOfWorkCompleted')(listField, nTask)
-                    tips = '{} 已添加完成列表。'.format(nTask)
+                    printMsg = '{} 已添加完成列表。'.format(nTask)
                     self.logObj.logHandler().info('ADDED: {}'.format(nTask))
-                    PrettyCode.prettyPrint(tips)
+                    PrettyCode.prettyPrint(printMsg)
 
         elif statusListField == 'oncall':
             for nTask in tasks:
                 if nTask in allTasks:
                     # 此次传递已完成任务列表的该项任务(nTask)在redis未完成任务列表中（该单项任务已经完成），删除notcomplete列表元素
                     getattr(self, '_statusOfWorkNotCompleted')(listField, nTask)
-                    tips = '{} 已删除未完成列表。'.format(nTask)
+                    printMsg = '{} 已删除未完成列表。'.format(nTask)
                     self.logObj.logHandler().info('DELETED: {}'.format(nTask))
-                    PrettyCode.prettyPrint(tips)
+                    PrettyCode.prettyPrint(printMsg)
 
             if sorted(tasks) == sorted(allTasks):
                 # 任务全部完成判断 -> 未完成任务列表为空，已完成任务列表等于所有任务列表
@@ -577,9 +628,9 @@ class Troy():
                 # 删除working hash
                 self.redisObj.redisPointer().hdel('{}_working'.format(taskId), addr)
 
-                msg = '{} - All tasks have been completed'.format(addr)
-                PrettyCode.prettyPrint(msg)
-                self.logObj.logHandler().info(msg)
+                printMsg = '{} - All tasks have been completed'.format(addr)
+                PrettyCode.prettyPrint(printMsg)
+                self.logObj.logHandler().info(printMsg)
                 return 1
         
         # 为hash添加列表
@@ -608,9 +659,9 @@ class Troy():
                     # 监测离线
                     self.logObj.logHandler().warning('Process terminated: {}.'.format(tName))
                     tFunc.start()
-                    msg = '{} 进程已重启。'.format(tName)
+                    printMsg = '{} 进程已重启。'.format(tName)
                     self.logObj.logHandler().warning('Process restarted: {}'.format(tName))
-                    PrettyCode.prettyPrint(msg)
+                    PrettyCode.prettyPrint(printMsg)
             time.sleep(10)
 
     def _daemonControl(self) -> Thread:
@@ -622,8 +673,9 @@ class Troy():
         daemonControl.setDaemon(True)
         return daemonControl
 
-    def _rccControl(self) -> Thread:
-        rccThread = Thread(target=self.rccTimer, name='rccTimer')
+    def _rccControl(self, taskId: str) -> Thread:
+        threadName = 'rccTimer_{}'.format(taskId)
+        rccThread = Thread(target=self.rccTimer, name=threadName, args=(taskId, ))
         return rccThread
 
     def _tcpControl(self) -> Thread:
