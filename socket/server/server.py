@@ -9,7 +9,7 @@
 
 import ast
 import json
-from logging import fatal
+from logging import error, fatal
 import socket
 import struct
 import time
@@ -153,7 +153,7 @@ class Troy():
         self.logObj.logHandler().warning('UDP server close.')
 
     def heartbeatMonitoring(self):
-        # 心跳监测函数 - 功能函数
+        # 数据接收调度函数
         tcpSocket = socket.socket()
         localIP = self.config.get('localConfig').get('ip')
         tcpSocket.bind((localIP, 11451))
@@ -196,39 +196,39 @@ class Troy():
                 try:
                     data = self.taskStatus(data = data.decode('utf-8'), addr = addr)
                 except Exception as e:
-                    # 数据异常
+                    # 数据处理过程出错
                     errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
                     self.logObj.logHandler().error(errorMsg)
                     PrettyCode.prettyPrint('数据异常，主动 {} 切断连接，开始等待其他连接。'.format(addr[0]))
                     self.logObj.logHandler().warning('Data anomalies, {} actively cut off the connection.'.format(addr[0]))
                     conn.close()
                     break
-
-                # 判断心跳信息 - keepAlive
-                if data == 'keepAlive':
-                    # redis
-                    if not addr[0] in self.redisObj.redisPointer().smembers('exists'):
-                        # redis未查询到记录，添加新主机
-                        self.redisObj.setAddData('exists', [addr[0]])
-                        self.logObj.logHandler().info('Online: {}'.format(addr[0]))
-                        PrettyCode.prettyPrint('已上线：{}'.format(addr[0]))
-                    PrettyCode.prettyPrint('心跳信息：{} - {}'.format(addr[0], data))
                 
-                elif data == 'keepGotIt':
-                    # 判断任务报文处理 - keepGotIt
-                    self.logObj.logHandler().info('{} - Message processing returned successfully.'.format(addr[0]))
-                    PrettyCode.prettyPrint('任务报文信息：{} - {}'.format(addr[0], data))
-                
-                elif data == 'keepRogerthat':
-                    # 判断数据提交情况 - keepRogerthat
-                    self.logObj.logHandler().info('{} - Data submission returned successfully.'.format(addr[0]))
-                    PrettyCode.prettyPrint('数据处理信息：{} - {}'.format(addr[0], data))
+                # 实例化复杂类
+                complexObj = ComplexCleanup(addr, data)
 
-                else:
+                dataDispatch = {
+                    'd0': complexObj.heartbeat_packet_processing,
+                    'd1': complexObj.task_status_information_processing,
+                    'd2': complexObj.normal_response_packet_processing,
+                    'd3': complexObj.system_information_processing,
+                }
+
+                if data not in dataDispatch.keys():
+                    self.logObj.logHandler().error('Illegal data in `heartbeatMonitoring`, the data is {}'.format(data))
+                    raise ValueError('Illegal data.')
+
+                try:
+                    dataDispatch[data]()
+
+                except Exception as e:
                     # 异常情况 - 非异常数据错误（代码错误）
+                    errorMsg = ('{} - {}'.format(e, e.__traceback__.tb_lineno))
+                    PrettyCode.prettyPrint(errorMsg)
+                    self.logObj.logHandler().error(errorMsg)
                     self.logObj.logHandler().error('There are some unexpected situations, the error function: heartbeatMonitoring(self) error report specific location: determine that the heartbeat information has entered the else.')
-                    continue
-                
+                continue
+                    
         self.logObj.logHandler().warning('TCP server close.')
         PrettyCode.prettyPrint('TCP SERVER 退出。', 'warning')
 
@@ -362,13 +362,24 @@ class Troy():
         # 配置文件
         self.config = PrettyCode.loadingConfigJson(r'.\config.json')
     
-    def _ADH18(self, recvDataDict: dict, *args, **kwargs) -> str:
+    def _ADH18(self, recvDataDict: dict, *args, **kwargs) -> int:
+        """心跳包处理
+
+        Args:
+            recvDataDict (dict): 接收的数据字典。
+
+        Raises:
+            ValueError: 异常数据，数据包内无'keepAlive'，疑似非法
+
+        Returns:
+            int: 0
+        """
         ack = recvDataDict.get('ACK')
         if ack != 'keepAlive':
             # 验证报文信息
             self.logObj.logHandler().error('abnormal data.')
             raise ValueError('异常数据。')
-        return ack
+        return 'd0'
 
     def _ADH27(self, recvDataDict: dict, *args, **kwargs) -> str:
         """任务报文处理
@@ -452,7 +463,7 @@ class Troy():
                         self.statusOfWork(addr, completeTask, taskId, 'oncall', statusFields[2])
                         self.logObj.logHandler().info('All tasks have been completed.')
 
-        return 'keepGotIt'
+        return 'd1'
 
     def _ADH33(self, recvDataDict: dict, *args, **kwargs) -> bool:
         """应答包处理函数
@@ -494,15 +505,35 @@ class Troy():
 
         elif rcc == 2:
             # 记录查到redis任务，手动处理
-            pass
+            errorMsg = recvDataDict.get('errorMsg', None)
+            msg = {
+                'RCC': 2,
+                'taskId': taskId,
+                'msg': 'The client does not recognize the tasks.',
+                'errorMsg': errorMsg,
+            }
+            # 上传redis
+            field = '{}_unrecognized'.format(taskId)
+            self.redisObj.redisPointer().sadd(field, addr)
+
+            # 转成json给其他程序调用
+            result = json.dumps(msg)
+
+            PrettyCode.prettyPrint('{}读取任务({})失败，已记录。'.format(addr, taskId))
+            self.logObj.logHandler().warning('{}Failed to read the task ({}), it has been recorded.'.format(addr, taskId))
+
+            return msg
 
         elif rcc == 1:
             # 正确应答，删除名单
             field = '{}_response'.format(taskId)
             self.redisObj.redisPointer().srem(field, addr)
-            return True
+            printMsg = '{} - 接收完成 - 指定主机。'.format(addr)
+            self.logObj.logHandler().info('{} - Received({})'.format(addr, taskId))
+            return 'd2'
 
         else:
+            self.logObj.logHandler().error('Abnormal RCC value, in ADH33 func.')
             raise ValueError('异常的rcc值。')
 
     def _ADH56(self, info: str, *args, **kwargs) -> None:
@@ -523,7 +554,7 @@ class Troy():
                 # another info
                 self.redisObj.redisPointer().sadd(systemInfoHashFields, value)
         PrettyCode.prettyPrint('ADH56任务处理完成。')
-        return 'keepRogerthat'
+        return 'd3'
 
     def _makeFieldsName(self, taskId, status, *args, **kwargs):
         # redis 任务状态字段
@@ -720,6 +751,37 @@ class UdpInfo():
     def key():
         # return str
         raise NotImplementedError('`key()` must be implemented.')
+
+
+class ComplexCleanup(Troy):
+    
+    def __init__(self, addr, data):
+        super().__init__()
+        self.addr = addr[0]
+        self.data = data
+
+    def heartbeat_packet_processing(self, *args, **kwargs):
+        # 判断心跳信息
+        if not self.addr[0] in self.redisObj.redisPointer().smembers('exists'):
+            # redis未查询到记录，添加新主机
+            self.redisObj.setAddData('exists', [self.addr])
+            self.logObj.logHandler().info('Online: {}'.format(self.addr))
+            PrettyCode.prettyPrint('已上线：{}'.format(self.addr))
+        PrettyCode.prettyPrint('正确应答：{} - {}'.format(self.addr, self.data))
+
+    def task_status_information_processing(self, *args, **kwargs):
+        # 判断任务报文处理
+        self.logObj.logHandler().info('{} - Message processing returned successfully.'.format(self.addr))
+        PrettyCode.prettyPrint('任务报文信息：{} - {}'.format(self.addr, self.data))
+
+    def normal_response_packet_processing(self, *args, **kwargs):
+        # 正常应答包处理
+        pass
+
+    def system_information_processing(self, *args, **kwargs):
+        # 数据处理
+        self.logObj.logHandler().info('{} - Data submission returned successfully.'.format(self.addr))
+        PrettyCode.prettyPrint('数据处理信息：{} - {}'.format(self.addr, self.data))
 
 
 if __name__ == "__main__":

@@ -301,9 +301,10 @@ class Client():
                 # 任务book为空，通知SERVER
                 raise ValueError('taskbook is null!')
                 
-        except:
+        except Exception as e:
             # 发送rcc为2的ADH33报文
-            self.sendMsg(self.makeInfoMsg(self._structureADH33Msg(2)))
+            errorMsg = '{} - {}'.format(e, e.__traceback__.tb_lineno)
+            self.sendMsg(self.makeInfoMsg(self._structureADH33Msg(2, taskId, (errorMsg, ))))
 
             PrettyCode.prettyPrint('任务获取失败。')
             raise ValueError('任务获取失败。')
@@ -461,13 +462,16 @@ class Client():
             self.logObj.logHandler().error(e)
             return False
 
-    def _structureADH33Msg(self, rcc, taskId=None):
+    def _structureADH33Msg(self, rcc, taskId=None, *args, **kwargs) -> dict:
         answer = {
             'flag': 'ADH33',
             'RCC': rcc,
             'taskId': taskId,
             'answerTime': time.time(),
         }
+        errorMsg = args[0][0]
+        if errorMsg:
+            answer['errorMsg'] = errorMsg
         return answer
 
     def _daemonThread(self, existsInfo: dict) -> thread:
